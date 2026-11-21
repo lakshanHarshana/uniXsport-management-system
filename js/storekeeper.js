@@ -692,32 +692,64 @@ function initSmartTerminal() {
         }
 
         const submitBtn = document.getElementById('btnCompleteIssue');
-        if (submitBtn) submitBtn.disabled = true;
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking out...';
+        }
+
+        const studentLookup = activeTerminalStudent.user_id || activeTerminalStudent.userId || activeTerminalStudent.regNo || activeTerminalStudent.id;
+        const failedItems = [];
+        const issuedItems = [];
 
         try {
-            for (const item of terminalCart) {
+            const itemsToProcess = [...terminalCart];
+            for (const item of itemsToProcess) {
+                let res = null;
                 if (window.UniXsportAPI && typeof window.UniXsportAPI.issueEquipment === 'function') {
-                    await window.UniXsportAPI.issueEquipment(
-                        activeTerminalStudent.user_id || activeTerminalStudent.regNo,
-                        item.id,
-                        item.qty
-                    );
+                    res = await window.UniXsportAPI.issueEquipment(studentLookup, item.id, item.qty).catch(e => ({ success: false, error: e.message }));
+                }
+                if (!res || !res.success) {
+                    res = await postStorekeeperAPI('/api/storekeeper/issue-gear', {
+                        userId: studentLookup,
+                        studentId: studentLookup,
+                        studentRegNo: studentLookup,
+                        equipmentId: item.id,
+                        qty: item.qty,
+                        quantity: item.qty
+                    });
+                }
+
+                if (res && res.success) {
+                    issuedItems.push(item);
+                    const idx = terminalCart.findIndex(c => c.id === item.id);
+                    if (idx >= 0) terminalCart.splice(idx, 1);
+                    renderTerminalCart();
+                } else {
+                    failedItems.push({ item, error: (res && res.error) || 'Stock conflict' });
                 }
             }
 
-            showToast(`Successfully issued equipment to ${activeTerminalStudent.name}!`, 'success');
-            terminalCart = [];
-            renderTerminalCart();
+            if (issuedItems.length > 0) {
+                showToast(`✓ Successfully issued ${issuedItems.length} item(s) to ${activeTerminalStudent.name}!`, 'success');
+            }
+            if (failedItems.length > 0) {
+                const errMsgs = failedItems.map(f => `${f.item.name}: ${f.error}`).join('; ');
+                showToast(errMsgs, 'error');
+            }
+
             await loadStorekeeperDatabase();
             if (activeTerminalStudent) {
-                await lookupTerminalStudent(activeTerminalStudent.user_id || activeTerminalStudent.regNo, false);
+                await lookupTerminalStudent(studentLookup, false);
             }
             renderStockTable();
             initDashboard();
         } catch (err) {
             showToast(err.message || 'Failed to complete checkout.', 'error');
         } finally {
-            if (submitBtn) submitBtn.disabled = false;
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-check-circle"></i> Complete Checkout';
+            }
         }
     });
 

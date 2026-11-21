@@ -84,7 +84,7 @@ router.get('/students', (req, res) => {
  * @route   POST /api/storekeeper/identify-student
  * @desc    Identify student from database via RFID UID, User ID, Reg No, or Email
  */
-router.post('/identify-student', (req, res) => {
+router.post('/identify-student', async (req, res) => {
   try {
     const { rfid, query, rfidTag, studentId, studentQuery, userId, tag } = req.body;
     const rawSearch = (rfid || query || rfidTag || studentId || studentQuery || userId || tag || '').trim();
@@ -96,7 +96,7 @@ router.post('/identify-student', (req, res) => {
     const target = rawSearch.toLowerCase();
 
     // Query existing users database
-    const matchedUser = db.users.find(u => {
+    let matchedUser = (db.users || []).find(u => {
       const uRfid = (u.rfidTag || u.rfidCode || u.rfid || '').toLowerCase().trim();
       const uUserId = (u.user_id || u.userId || '').toLowerCase().trim();
       const uReg = (u.regNo || '').toLowerCase().trim();
@@ -111,6 +111,33 @@ router.post('/identify-student', (req, res) => {
              (uUsername && uUsername === target) ||
              (uId && uId === target);
     });
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (!matchedUser && mongo) {
+      try {
+        const uDoc = await mongo.collection('users').findOne({
+          $or: [
+            { id: target },
+            { user_id: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { userId: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { regNo: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { rfidTag: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { rfidCode: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { email: { $regex: new RegExp('^' + target + '$', 'i') } },
+            { username: { $regex: new RegExp('^' + target + '$', 'i') } }
+          ]
+        });
+        if (uDoc) {
+          matchedUser = Object.assign({}, uDoc);
+          delete matchedUser._id;
+          const existingIdx = (db.users || []).findIndex(u => u.id === matchedUser.id);
+          if (existingIdx >= 0) db.users[existingIdx] = matchedUser;
+          else db.users.push(matchedUser);
+        }
+      } catch (e) {
+        console.warn('[Storekeeper Identify] Live Mongo fetch note:', e.message);
+      }
+    }
 
     // 1. Unknown RFID Handling
     if (!matchedUser) {
@@ -147,6 +174,21 @@ router.post('/identify-student', (req, res) => {
     }
 
     // 4. Retrieve any currently active borrow logs for this student
+    if (mongo) {
+      try {
+        const liveLogs = await mongo.collection('borrowLogs').find({}).toArray();
+        if (liveLogs && liveLogs.length > 0) {
+          db.borrowLogs = liveLogs.map(d => {
+            const c = { ...d };
+            delete c._id;
+            return c;
+          });
+        }
+      } catch (e) {
+        console.warn('[Storekeeper Identify] Live borrowLogs fetch note:', e.message);
+      }
+    }
+
     const studentIds = [
       (matchedUser.user_id || '').toLowerCase(),
       (matchedUser.userId || '').toLowerCase(),
@@ -220,7 +262,7 @@ async function handleIssueItem(req, res) {
     return res.status(400).json({ success: false, error: 'Student ID or Registration No is required.' });
   }
 
-  const student = db.users.find(u =>
+  let student = (db.users || []).find(u =>
     (u.user_id && u.user_id.toLowerCase() === lookup.toLowerCase()) ||
     (u.userId && u.userId.toLowerCase() === lookup.toLowerCase()) ||
     (u.regNo && u.regNo.toLowerCase() === lookup.toLowerCase()) ||
@@ -228,6 +270,27 @@ async function handleIssueItem(req, res) {
     (u.rfidTag && u.rfidTag.toLowerCase() === lookup.toLowerCase()) ||
     (u.email && u.email.toLowerCase() === lookup.toLowerCase())
   );
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (!student && mongo) {
+    try {
+      const uDoc = await mongo.collection('users').findOne({
+        $or: [
+          { id: lookup },
+          { user_id: { $regex: new RegExp('^' + lookup + '$', 'i') } },
+          { userId: { $regex: new RegExp('^' + lookup + '$', 'i') } },
+          { regNo: { $regex: new RegExp('^' + lookup + '$', 'i') } },
+          { rfidTag: { $regex: new RegExp('^' + lookup + '$', 'i') } },
+          { email: { $regex: new RegExp('^' + lookup + '$', 'i') } }
+        ]
+      });
+      if (uDoc) {
+        student = Object.assign({}, uDoc);
+        delete student._id;
+        db.users.push(student);
+      }
+    } catch (e) {}
+  }
 
   if (!student) {
     return res.status(404).json({ success: false, error: 'Student not found in database.' });
@@ -241,10 +304,25 @@ async function handleIssueItem(req, res) {
     return res.status(403).json({ success: false, error: 'Student Account Inactive. This student cannot take or return equipment.' });
   }
 
-  const item = db.equipment.find(e =>
+  let item = (db.equipment || []).find(e =>
     String(e.id) === String(equipmentId) ||
     (e.name && e.name.toLowerCase() === String(equipmentId).toLowerCase())
   );
+  if (!item && mongo) {
+    try {
+      const eqDoc = await mongo.collection('equipment').findOne({
+        $or: [
+          { id: equipmentId },
+          { name: { $regex: new RegExp('^' + equipmentId + '$', 'i') } }
+        ]
+      });
+      if (eqDoc) {
+        item = Object.assign({}, eqDoc);
+        delete item._id;
+        db.equipment.push(item);
+      }
+    } catch (e) {}
+  }
   if (!item) {
     return res.status(404).json({ success: false, error: 'Equipment item not found.' });
   }
@@ -399,14 +477,43 @@ router.post('/return-item', async (req, res) => {
     const { logId, equipmentId, studentId, quantity } = req.body;
 
     let log = null;
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+
     if (logId) {
-      log = db.borrowLogs.find(b => String(b.id) === String(logId));
+      log = (db.borrowLogs || []).find(b => String(b.id) === String(logId));
     } else if (equipmentId && studentId) {
-      log = db.borrowLogs.find(b => 
+      log = (db.borrowLogs || []).find(b => 
         (String(b.equipmentId) === String(equipmentId) || b.equipmentName === equipmentId) &&
         (String(b.studentId) === String(studentId) || String(b.user_id) === String(studentId) || String(b.studentRegNo) === String(studentId)) &&
         (b.status === 'borrowed' || b.status === 'taken' || b.status === 'Partially Returned')
       );
+    }
+
+    if (!log && mongo) {
+      try {
+        let queryObj = null;
+        if (logId) {
+          queryObj = { id: logId };
+        } else if (equipmentId && studentId) {
+          queryObj = {
+            $and: [
+              { $or: [{ id: equipmentId }, { equipmentId: equipmentId }, { equipmentName: equipmentId }] },
+              { $or: [{ studentId: studentId }, { user_id: studentId }, { studentRegNo: studentId }] },
+              { status: { $ne: 'returned' } }
+            ]
+          };
+        }
+        if (queryObj) {
+          const foundLog = await mongo.collection('borrowLogs').findOne(queryObj);
+          if (foundLog) {
+            log = Object.assign({}, foundLog);
+            delete log._id;
+            db.borrowLogs.unshift(log);
+          }
+        }
+      } catch (e) {
+        console.warn('[Storekeeper Return] Mongo fetch borrowLog error:', e.message);
+      }
     }
 
     if (!log) {
@@ -462,7 +569,22 @@ router.post('/return-item', async (req, res) => {
     }
 
     // Restore Equipment Stock Count
-    const item = db.equipment.find(e => String(e.id) === String(log.equipmentId) || e.name === log.equipmentName);
+    let item = (db.equipment || []).find(e => String(e.id) === String(log.equipmentId) || e.name === log.equipmentName);
+    if (!item && mongo) {
+      try {
+        const foundEq = await mongo.collection('equipment').findOne({
+          $or: [
+            { id: log.equipmentId },
+            { name: log.equipmentName }
+          ]
+        });
+        if (foundEq) {
+          item = Object.assign({}, foundEq);
+          delete item._id;
+          db.equipment.push(item);
+        }
+      } catch (e) {}
+    }
     if (item) {
       item.availableQty = (item.availableQty !== undefined ? item.availableQty : 0) + returnQty;
       item.available = item.availableQty;
@@ -735,7 +857,7 @@ router.get('/rfid-registry', (req, res) => {
  * @route   POST /api/storekeeper/search-student
  * @desc    Search student by User ID (e.g. US002) for RFID assignment
  */
-router.post('/search-student', (req, res) => {
+router.post('/search-student', async (req, res) => {
   try {
     const { userId, query, studentId } = req.body;
     const rawLookup = (userId || studentId || query || '').trim();
@@ -748,7 +870,7 @@ router.post('/search-student', (req, res) => {
     }
 
     const cleanLookup = rawLookup.toLowerCase().replace(/[\s\-_]/g, '');
-    const user = db.users.find(u => {
+    let user = (db.users || []).find(u => {
       const uUserId = (u.user_id || u.userId || '').toLowerCase().replace(/[\s\-_]/g, '');
       const uReg = (u.regNo || '').toLowerCase().replace(/[\s\-_]/g, '');
       const uId = String(u.id || '').toLowerCase().replace(/[\s\-_]/g, '');
@@ -763,6 +885,28 @@ router.post('/search-student', (req, res) => {
              (uEmail && uEmail === rawLookup.toLowerCase()) ||
              (uUsername && uUsername === cleanLookup);
     });
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (!user && mongo) {
+      try {
+        const uDoc = await mongo.collection('users').findOne({
+          $or: [
+            { id: rawLookup },
+            { user_id: { $regex: new RegExp(rawLookup, 'i') } },
+            { userId: { $regex: new RegExp(rawLookup, 'i') } },
+            { regNo: { $regex: new RegExp(rawLookup, 'i') } },
+            { rfidTag: { $regex: new RegExp(rawLookup, 'i') } },
+            { email: { $regex: new RegExp('^' + rawLookup + '$', 'i') } },
+            { name: { $regex: new RegExp(rawLookup, 'i') } }
+          ]
+        });
+        if (uDoc) {
+          user = Object.assign({}, uDoc);
+          delete user._id;
+          db.users.push(user);
+        }
+      } catch (e) {}
+    }
 
     if (!user) {
       return res.status(404).json({

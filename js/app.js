@@ -1159,19 +1159,38 @@ function initRequestEquipmentForm() {
         e.preventDefault();
         if (!validateRequestEquipment(form)) return;
 
-        const eqName = equipmentSelect.value;
+        const eqId = equipmentSelect.value;
         const qty = parseInt(quantityInput.value) || 1;
-
-        try {
-            await window.UniXsportAPI.requestEquipment(eqName, qty);
-        } catch (e) {
-            console.warn('Equipment API sync:', e.message);
+        const reason = (form.querySelector('[name="reason"]')?.value || '').trim();
+        const submitBtn = form.querySelector('.btn-submit');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
         }
 
-        showModal('Your equipment request has been submitted successfully to the sports room.');
-        form.reset();
-        maxAvailableSpan.textContent = '0';
-        updateStudentDashboardStats();
+        try {
+            const res = await window.UniXsportAPI.requestEquipment(eqId, qty, reason);
+            if (res && res.success) {
+                showModal('Your equipment request has been submitted successfully to the sports room.');
+                form.reset();
+                maxAvailableSpan.textContent = '0';
+                await updateStudentDashboardStats();
+                await loadBorrowHistory();
+                if (typeof loadEquipmentAvailability === 'function') {
+                    await loadEquipmentAvailability();
+                }
+            } else {
+                alert(res?.error || 'Failed to request equipment. Please check availability.');
+            }
+        } catch (e) {
+            console.warn('Equipment API error:', e.message);
+            alert(e.message || 'Error submitting equipment request. Please try again.');
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Request';
+            }
+        }
     });
 }
 
@@ -1879,7 +1898,7 @@ async function loadEquipmentAvailability() {
         select.innerHTML = '<option value="">Select equipment...</option>' + 
             equipmentList.map(eq => {
                 const avail = (eq.available !== undefined) ? eq.available : (eq.availableQty !== undefined ? eq.availableQty : eq.totalQty || 0);
-                return `<option value="${eq.name}" data-available="${avail}">${eq.name} - ${avail} available</option>`;
+                return `<option value="${eq.id || eq.name}" data-available="${avail}">${eq.name} - ${avail} available</option>`;
             }).join('');
     }
 
@@ -1977,6 +1996,8 @@ async function loadBorrowHistory() {
                     const formattedDate = formatColomboDateTime(rawDate);
                     const rawReturnDate = b.returnedAt || b.returnDate || '';
                     const formattedReturnDate = formatColomboDateTime(rawReturnDate);
+                    const safeName = (b.equipmentName || b.equipment || 'Equipment').replace(/'/g, "\\'");
+                    const remQty = b.borrowedQty || b.quantity || 1;
 
                     return `
                         <div class="borrow-card ${badgeClass}">
@@ -1989,6 +2010,13 @@ async function loadBorrowHistory() {
                                 <p>Quantity: ${b.quantity || b.qty || 1}${isPartial ? ` (${b.borrowedQty} remaining)` : ''}</p>
                                 <p>Date: ${formattedDate}</p>
                                 ${b.returnedAt ? `<p>Returned: ${formattedReturnDate}</p>` : ''}
+                                ${!isReturned ? `
+                                <div style="margin-top: 10px; display: flex; justify-content: flex-end;">
+                                    <button type="button" class="btn btn-sm" onclick="studentReturnItem('${b.id}', '${safeName}', ${remQty})" style="padding: 5px 12px; font-size: 0.82rem; font-weight: 600; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #16a34a; color: #16a34a; background: transparent; cursor: pointer;">
+                                        <i class="fas fa-undo"></i> Return Item
+                                    </button>
+                                </div>
+                                ` : ''}
                             </div>
                         </div>
                     `;
@@ -2008,6 +2036,35 @@ async function loadBorrowHistory() {
         return;
     }
 }
+
+window.studentReturnItem = async function(logId, equipmentName, qty) {
+    if (!confirm(`Are you returning this ${equipmentName} (${qty} item${qty > 1 ? 's' : ''}) now?`)) {
+        return;
+    }
+    try {
+        let res = null;
+        if (window.UniXsportAPI && typeof window.UniXsportAPI.studentReturnEquipment === 'function') {
+            res = await window.UniXsportAPI.studentReturnEquipment(logId, qty);
+        } else {
+            res = await fetchStudentAPI('/api/student/return-item', {
+                method: 'POST',
+                body: JSON.stringify({ logId, quantity: qty })
+            });
+        }
+        if (res && res.success) {
+            showModal(res.message || `Successfully returned ${equipmentName}.`);
+            await loadBorrowHistory();
+            await updateStudentDashboardStats();
+            if (typeof loadEquipmentAvailability === 'function') {
+                await loadEquipmentAvailability();
+            }
+        } else {
+            alert(res?.error || 'Failed to return equipment. Please try again or return at the sports counter.');
+        }
+    } catch (err) {
+        alert(err.message || 'Error processing return. Please check your network connection.');
+    }
+};
 
 // ========== Dynamic Student Dashboard Statistics ==========
 async function updateStudentDashboardStats() {

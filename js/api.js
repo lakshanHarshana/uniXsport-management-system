@@ -301,10 +301,17 @@ class UniXsportAPI {
     });
   }
 
-  static async requestEquipment(equipmentId, qty) {
+  static async requestEquipment(equipmentId, qty, reason = '') {
     return await this.request('/api/student/equipment-request', {
       method: 'POST',
-      body: JSON.stringify({ equipmentId, qty })
+      body: JSON.stringify({ equipmentId, qty, reason })
+    });
+  }
+
+  static async studentReturnEquipment(logId, quantity = null) {
+    return await this.request('/api/student/return-item', {
+      method: 'POST',
+      body: JSON.stringify({ logId, quantity })
     });
   }
 

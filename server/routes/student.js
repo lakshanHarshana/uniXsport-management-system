@@ -72,8 +72,30 @@ function matchesStudentLog(log, studentIdentifiers) {
  * @route   GET /api/student/dashboard
  * @desc    Fetch overview metrics & dashboard info for student
  */
-router.get('/dashboard', (req, res) => {
+router.get('/dashboard', async (req, res) => {
   const myIds = getStudentIdentifiers(req.user);
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const [logs, reqs, plans] = await Promise.all([
+        mongo.collection('borrowLogs').find({}).toArray().catch(() => []),
+        mongo.collection('gymRequests').find({}).toArray().catch(() => []),
+        mongo.collection('workoutPlans').find({}).toArray().catch(() => [])
+      ]);
+      if (logs && logs.length > 0) {
+        db.borrowLogs = logs.map(d => { const c = { ...d }; delete c._id; return c; });
+      }
+      if (reqs && reqs.length > 0) {
+        db.gymRequests = reqs.map(d => { const c = { ...d }; delete c._id; return c; });
+      }
+      if (plans && plans.length > 0) {
+        db.workoutPlans = plans.map(d => { const c = { ...d }; delete c._id; return c; });
+      }
+    } catch (e) {
+      console.warn('[Student Dashboard] Live Mongo fetch note:', e.message);
+    }
+  }
 
   const upcomingSessions = (db.gymRequests || []).filter(
     r => matchesStudentLog(r, myIds) && r.status === 'approved'
@@ -84,7 +106,7 @@ router.get('/dashboard', (req, res) => {
   );
 
   const borrowedEquipment = (db.borrowLogs || []).filter(
-    b => matchesStudentLog(b, myIds) && (b.status === 'borrowed' || b.status === 'taken')
+    b => matchesStudentLog(b, myIds) && (b.status === 'borrowed' || b.status === 'taken' || b.status === 'Partially Returned')
   );
 
   const workoutPlan = (db.workoutPlans || []).find(
@@ -115,9 +137,25 @@ router.get('/dashboard', (req, res) => {
  * @route   GET /api/student/borrow-history
  * @desc    Fetch authenticated student's real equipment borrowing & return history
  */
-router.get('/borrow-history', (req, res) => {
+router.get('/borrow-history', async (req, res) => {
   const myIds = getStudentIdentifiers(req.user);
   const { equipment, dateFrom, dateTo, status } = req.query;
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const docs = await mongo.collection('borrowLogs').find({}).toArray();
+      if (docs && docs.length > 0) {
+        db.borrowLogs = docs.map(d => {
+          const c = { ...d };
+          delete c._id;
+          return c;
+        });
+      }
+    } catch (e) {
+      console.warn('[Student Borrow History] Live Mongo fetch note:', e.message);
+    }
+  }
 
   function getColomboDate(isoStr) {
     if (!isoStr) return '';
@@ -487,17 +525,39 @@ router.delete('/schedule/:id', (req, res) => {
  * @route   POST /api/student/equipment-request
  * @desc    Submit an equipment borrow request
  */
-router.post('/equipment-request', (req, res) => {
-  const { equipmentId, qty } = req.body;
+router.post('/equipment-request', async (req, res) => {
+  const { equipmentId, qty, reason } = req.body;
 
-  const item = db.equipment.find(e => e.id === equipmentId);
+  let item = (db.equipment || []).find(e =>
+    String(e.id) === String(equipmentId) ||
+    (e.name && e.name.toLowerCase() === String(equipmentId).toLowerCase())
+  );
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (!item && mongo) {
+    try {
+      const doc = await mongo.collection('equipment').findOne({
+        $or: [
+          { id: equipmentId },
+          { name: { $regex: new RegExp('^' + equipmentId + '$', 'i') } }
+        ]
+      });
+      if (doc) {
+        item = Object.assign({}, doc);
+        delete item._id;
+        db.equipment.push(item);
+      }
+    } catch (e) {}
+  }
+
   if (!item) {
     return res.status(404).json({ success: false, error: 'Equipment not found.' });
   }
 
   const quantity = parseInt(qty) || 1;
-  if (quantity > item.availableQty) {
-    return res.status(400).json({ success: false, error: `Requested quantity exceeds available stock (${item.availableQty}).` });
+  const availableCount = item.availableQty !== undefined ? item.availableQty : (item.available !== undefined ? item.available : 0);
+  if (quantity > availableCount) {
+    return res.status(400).json({ success: false, error: `Requested quantity exceeds available stock (${availableCount}).` });
   }
 
   const newLog = {
@@ -517,11 +577,11 @@ router.post('/equipment-request', (req, res) => {
     expectedReturnAt: new Date(Date.now() + 86400000).toISOString(),
     returnedAt: null,
     status: 'borrowed',
-    notes: 'Requested via online portal'
+    notes: reason || 'Requested via online portal'
   };
 
   // Adjust available stock
-  item.availableQty = Math.max(0, (item.availableQty !== undefined ? item.availableQty : item.available) - quantity);
+  item.availableQty = Math.max(0, availableCount - quantity);
   item.available = item.availableQty;
   item.borrowedQty = (item.borrowedQty || 0) + quantity;
   item.borrowed = item.borrowedQty;
@@ -530,20 +590,135 @@ router.post('/equipment-request', (req, res) => {
   db.borrowLogs.unshift(newLog);
   saveDatabase();
 
-  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
   if (mongo) {
     try {
       const cleanItem = { ...item };
       delete cleanItem._id;
-      mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true }).catch(() => {});
+      await mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true });
 
       const cleanLog = { ...newLog };
       delete cleanLog._id;
-      mongo.collection('borrowLogs').insertOne(cleanLog).catch(() => {});
-    } catch (e) {}
+      await mongo.collection('borrowLogs').insertOne(cleanLog);
+    } catch (e) {
+      console.warn('[Student Equipment Request] Mongo sync error:', e.message);
+    }
   }
 
   res.json({ success: true, message: 'Equipment requested successfully.', log: newLog });
+});
+
+/**
+ * @route   POST /api/student/return-item
+ * @desc    Allow student to return borrowed equipment online
+ */
+router.post('/return-item', async (req, res) => {
+  try {
+    const { logId, quantity } = req.body;
+    const myIds = getStudentIdentifiers(req.user);
+
+    let log = (db.borrowLogs || []).find(b => String(b.id) === String(logId));
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+
+    if (!log && mongo) {
+      try {
+        const found = await mongo.collection('borrowLogs').findOne({ id: logId });
+        if (found) {
+          log = Object.assign({}, found);
+          delete log._id;
+          db.borrowLogs.unshift(log);
+        }
+      } catch (e) {}
+    }
+
+    if (!log) {
+      return res.status(404).json({ success: false, error: 'Borrow record not found.' });
+    }
+
+    // Verify ownership
+    if (!matchesStudentLog(log, myIds)) {
+      return res.status(403).json({ success: false, error: 'Unauthorized: This borrow record belongs to a different student.' });
+    }
+
+    if ((log.status || '').toLowerCase() === 'returned') {
+      return res.status(400).json({ success: false, error: 'Item has already been fully returned.' });
+    }
+
+    const totalQty = log.qty !== undefined ? log.qty : (log.quantity !== undefined ? log.quantity : 1);
+    const prevReturnedQty = log.returnedQty || 0;
+    const remainingBorrowedQty = Math.max(0, totalQty - prevReturnedQty);
+
+    if (remainingBorrowedQty <= 0) {
+      log.status = 'returned';
+      saveDatabase();
+      return res.status(400).json({ success: false, error: 'Item has already been fully returned.' });
+    }
+
+    let returnQty = parseInt(quantity);
+    if (isNaN(returnQty) || returnQty <= 0 || returnQty > remainingBorrowedQty) {
+      returnQty = remainingBorrowedQty;
+    }
+
+    const newReturnedQty = prevReturnedQty + returnQty;
+    log.returnedQty = newReturnedQty;
+    log.returnedAt = new Date().toISOString();
+
+    if (newReturnedQty >= totalQty) {
+      log.status = 'returned';
+    } else {
+      log.status = 'Partially Returned';
+    }
+
+    // Restore stock
+    let item = (db.equipment || []).find(e => String(e.id) === String(log.equipmentId) || e.name === log.equipmentName);
+    if (!item && mongo) {
+      try {
+        const eqDoc = await mongo.collection('equipment').findOne({
+          $or: [
+            { id: log.equipmentId },
+            { name: log.equipmentName }
+          ]
+        });
+        if (eqDoc) {
+          item = Object.assign({}, eqDoc);
+          delete item._id;
+          db.equipment.push(item);
+        }
+      } catch (e) {}
+    }
+
+    if (item) {
+      item.availableQty = (item.availableQty !== undefined ? item.availableQty : 0) + returnQty;
+      item.available = item.availableQty;
+      item.borrowedQty = Math.max(0, (item.borrowedQty || 0) - returnQty);
+      if (item.availableQty > 0) item.status = 'available';
+    }
+
+    saveDatabase();
+
+    if (mongo) {
+      try {
+        if (item) {
+          const cleanItem = { ...item };
+          delete cleanItem._id;
+          await mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true });
+        }
+        const cleanLog = { ...log };
+        delete cleanLog._id;
+        await mongo.collection('borrowLogs').replaceOne({ id: log.id }, cleanLog, { upsert: true });
+      } catch (e) {
+        console.warn('[Student Return] Mongo sync error:', e.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully returned ${returnQty}x ${log.equipmentName}.`,
+      log
+    });
+  } catch (err) {
+    console.error('Student return error:', err);
+    res.status(500).json({ success: false, error: 'Failed to return equipment.' });
+  }
 });
 
 /**

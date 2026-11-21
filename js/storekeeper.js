@@ -1400,13 +1400,31 @@ async function processReturnEquipment(logId) {
     }
 
     try {
+        let returned = false;
         if (window.UniXsportAPI && typeof window.UniXsportAPI.returnEquipment === 'function') {
-            await window.UniXsportAPI.returnEquipment(
+            try {
+                const res = await window.UniXsportAPI.returnEquipment(
+                    logId,
+                    returnQty,
+                    activeTerminalStudent.user_id || activeTerminalStudent.regNo,
+                    item.equipmentId
+                );
+                if (res && res.success) returned = true;
+            } catch (apiErr) {
+                console.warn('Direct returnEquipment API note:', apiErr.message);
+            }
+        }
+
+        if (!returned) {
+            const fbRes = await postStorekeeperAPI('/api/storekeeper/return-item', {
                 logId,
-                returnQty,
-                activeTerminalStudent.user_id || activeTerminalStudent.regNo,
-                item.equipmentId
-            );
+                quantity: returnQty,
+                studentId: activeTerminalStudent.user_id || activeTerminalStudent.regNo,
+                equipmentId: item.equipmentId
+            });
+            if (!fbRes || !fbRes.success) {
+                throw new Error((fbRes && fbRes.error) || 'Failed to complete equipment return.');
+            }
         }
 
         showToast(`Successfully returned ${returnQty}x ${item.equipmentName}!`, 'success');

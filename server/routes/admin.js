@@ -225,6 +225,15 @@ router.post('/create-user', async (req, res) => {
     db.users.push(newUser);
     saveDatabase();
 
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        const cleanUser = { ...newUser };
+        delete cleanUser._id;
+        mongo.collection('users').insertOne(cleanUser).catch(() => {});
+      } catch (e) {}
+    }
+
     const sanitizedUser = { ...newUser };
     delete sanitizedUser.password;
     delete sanitizedUser.passwordHash;
@@ -331,6 +340,16 @@ router.patch('/user/:id', async (req, res) => {
     }
 
     saveDatabase();
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        const cleanUser = { ...user };
+        delete cleanUser._id;
+        mongo.collection('users').replaceOne({ id: user.id }, cleanUser, { upsert: true }).catch(() => {});
+      } catch (e) {}
+    }
+
     res.json({ success: true, message: 'User updated successfully.', user });
   } catch (err) {
     console.error('Error updating user:', err);
@@ -543,6 +562,15 @@ router.post('/equipment', (req, res) => {
   db.equipment.push(newEquip);
   saveDatabase();
 
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const cleanEq = { ...newEquip };
+      delete cleanEq._id;
+      mongo.collection('equipment').insertOne(cleanEq).catch(() => {});
+    } catch (e) {}
+  }
+
   res.status(201).json({ success: true, message: 'Equipment added successfully.', equipment: newEquip });
 });
 
@@ -613,6 +641,15 @@ router.patch('/equipment/:id', (req, res) => {
   }
 
   saveDatabase();
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const cleanEq = { ...eq };
+      delete cleanEq._id;
+      mongo.collection('equipment').replaceOne({ id: eq.id }, cleanEq, { upsert: true }).catch(() => {});
+    } catch (e) {}
+  }
 
   res.json({ success: true, message: 'Equipment updated successfully.', equipment: eq });
 });

@@ -419,6 +419,7 @@ router.post('/assign-workout', (req, res) => {
     plan.updatedAt = new Date().toISOString();
   } else {
     plan = {
+      id: 'wp_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
       studentId: studentRegNo,
       coachId: req.user ? req.user.name : 'Coach',
       weeklyExercises: weeklyExercises || [],
@@ -429,6 +430,16 @@ router.post('/assign-workout', (req, res) => {
   }
 
   saveDatabase();
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const cleanPlan = { ...plan };
+      delete cleanPlan._id;
+      mongo.collection('workoutPlans').replaceOne({ studentId: plan.studentId }, cleanPlan, { upsert: true }).catch(() => {});
+    } catch (e) {}
+  }
+
   res.json({ success: true, message: 'Workout plan updated successfully in database.', plan });
 });
 
@@ -618,51 +629,6 @@ router.delete('/notice/:id', (req, res) => {
         success: true,
         message: 'Notice deleted successfully.',
         notice: deleted[0]
-    });
-});
-
-/**
- * @route   GET /api/coach/student-progress/:studentRegNo
- * @desc    Fetch student workout progress and assigned sets/reps for coach
- */
-router.get('/student-progress/:studentRegNo', (req, res) => {
-    const { studentRegNo } = req.params;
-    if (!studentRegNo) {
-        return res.status(400).json({ success: false, error: 'Student registration number is required.' });
-    }
-    
-    const plan = (db.workoutPlans || []).find(p => {
-        const planId = (p.studentId || p.studentRegNo || '').toLowerCase().trim();
-        return planId === studentRegNo.toLowerCase().trim();
-    });
-    
-    if (!plan) {
-        return res.json({ success: true, plan: null, message: 'No workout plan found for this student.' });
-    }
-    
-    const exercises = (plan.weeklyExercises || []).map((ex, idx) => {
-        if (typeof ex === 'string') {
-            return { name: ex, completed: false, progressDate: null, index: idx };
-        }
-        return { completed: false, progressDate: null, ...ex, index: idx };
-    });
-    
-    const totalExercises = exercises.length;
-    const completedCount = exercises.filter(e => e.completed).length;
-    const progressPercent = totalExercises > 0 ? Math.round((completedCount / totalExercises) * 100) : 0;
-    
-    res.json({
-        success: true,
-        plan: {
-            studentId: plan.studentId,
-            coachId: plan.coachId,
-            coachNotes: plan.coachNotes,
-            updatedAt: plan.updatedAt,
-            exercises,
-            totalExercises,
-            completedCount,
-            progressPercent
-        }
     });
 });
 

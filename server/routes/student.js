@@ -502,12 +502,17 @@ router.post('/equipment-request', (req, res) => {
 
   const newLog = {
     id: 'brw_' + Date.now(),
-    studentId: req.user.regNo,
+    user_id: req.user.user_id || req.user.userId || 'US002',
+    studentId: req.user.user_id || req.user.regNo || req.user.id,
+    studentRegNo: req.user.regNo || req.user.user_id,
     studentName: req.user.name,
+    studentEmail: req.user.email || '',
     equipmentId: item.id,
     equipmentName: item.name,
     qty: quantity,
-    issuedBy: 'Pending Storekeeper Approval',
+    quantity: quantity,
+    returnedQty: 0,
+    issuedBy: 'Online Portal Request',
     issuedAt: new Date().toISOString(),
     expectedReturnAt: new Date(Date.now() + 86400000).toISOString(),
     returnedAt: null,
@@ -516,12 +521,27 @@ router.post('/equipment-request', (req, res) => {
   };
 
   // Adjust available stock
-  item.availableQty -= quantity;
+  item.availableQty = Math.max(0, (item.availableQty !== undefined ? item.availableQty : item.available) - quantity);
+  item.available = item.availableQty;
   item.borrowedQty = (item.borrowedQty || 0) + quantity;
+  item.borrowed = item.borrowedQty;
   if (item.availableQty === 0) item.status = 'borrowed';
 
   db.borrowLogs.unshift(newLog);
   saveDatabase();
+
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const cleanItem = { ...item };
+      delete cleanItem._id;
+      mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true }).catch(() => {});
+
+      const cleanLog = { ...newLog };
+      delete cleanLog._id;
+      mongo.collection('borrowLogs').insertOne(cleanLog).catch(() => {});
+    } catch (e) {}
+  }
 
   res.json({ success: true, message: 'Equipment requested successfully.', log: newLog });
 });

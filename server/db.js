@@ -34,6 +34,7 @@ let isMongoConnected = false;
 let mongoDbInstance = null;
 let isSyncing = false;
 let syncQueued = false;
+let initialMongoSyncDone = false;
 
 const COLLECTIONS = [
   'users',
@@ -153,7 +154,6 @@ async function connectMongoDB() {
       serverSelectionTimeoutMS: 12000
     });
     
-    isMongoConnected = true;
     mongoDbInstance = conn.connection.db;
     console.log('[UniXsport Database] Connected to MongoDB Atlas successfully.');
 
@@ -192,6 +192,8 @@ async function connectMongoDB() {
       data.meta = cleanMeta;
     }
 
+    isMongoConnected = true;
+    initialMongoSyncDone = true;
     console.log(`[UniXsport Database] Synchronized ${totalLoaded} documents from MongoDB Atlas.`);
     migrateUserIds();
     scrubPlaintextPasswords();
@@ -267,7 +269,7 @@ function saveLocalJson() {
  * - Queues concurrent sync operations sequentially to prevent race collisions
  */
 async function syncToMongoInternal() {
-  if (!isMongoConnected || !mongoDbInstance) return;
+  if (!isMongoConnected || !mongoDbInstance || !initialMongoSyncDone) return;
   if (isSyncing) {
     syncQueued = true;
     return;
@@ -280,7 +282,6 @@ async function syncToMongoInternal() {
       const records = data[colName] || [];
 
       if (records.length === 0) {
-        await col.deleteMany({});
         continue;
       }
 
@@ -300,6 +301,8 @@ async function syncToMongoInternal() {
         } else if (copy.user_id) {
           filter = { user_id: copy.user_id };
           currentIds.push(copy.user_id);
+        } else if (copy.studentId && colName === 'workoutPlans') {
+          filter = { studentId: copy.studentId };
         } else if (copy.token) {
           filter = { token: copy.token };
         }
@@ -318,11 +321,6 @@ async function syncToMongoInternal() {
       // Execute atomic bulk upserts
       if (bulkOps.length > 0) {
         await col.bulkWrite(bulkOps, { ordered: false });
-      }
-
-      // Remove records deleted from memory that have explicit 'id'
-      if (currentIds.length > 0) {
-        await col.deleteMany({ id: { $nin: currentIds } });
       }
     }
 

@@ -259,18 +259,81 @@ async function handleIssueItem(req, res) {
   const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
   if (mongo) {
     try {
-      const result = await mongo.collection('equipment').findOneAndUpdate(
-        { id: item.id, availableQty: { $gte: issueQty } },
+      let result = await mongo.collection('equipment').findOneAndUpdate(
+        {
+          id: item.id,
+          $or: [
+            { availableQty: { $gte: issueQty } },
+            { available: { $gte: issueQty } }
+          ]
+        },
         {
           $inc: { availableQty: -issueQty, available: -issueQty, borrowedQty: issueQty, borrowed: issueQty },
           $set: { updatedAt: new Date().toISOString() }
         },
         { returnDocument: 'after' }
       );
-      if (!result || !result.value) {
+
+      // In MongoDB driver v6+, findOneAndUpdate returns the document directly or null.
+      // In older driver v5/v4 or with includeResultMetadata, it returns { value: doc }.
+      let updatedDoc = (result && result.value !== undefined) ? result.value : result;
+
+      // Self-healing: If MongoDB had a conflict, verify if actual borrow records justify out-of-stock
+      // (Protects against corrupted stock counts caused by repeated aborted checkout attempts)
+      if (!updatedDoc) {
+        const activeBorrowsForEquipment = (db.borrowLogs || []).filter(log =>
+          String(log.equipmentId) === String(item.id) &&
+          log.status !== 'returned'
+        );
+        const trueBorrowedQty = activeBorrowsForEquipment.reduce((sum, log) => {
+          const tot = parseInt(log.qty || log.quantity) || 1;
+          const ret = parseInt(log.returnedQty) || 0;
+          return sum + Math.max(0, tot - ret);
+        }, 0);
+        const trueTotal = parseInt(item.totalQty !== undefined ? item.totalQty : item.total) || 0;
+        const trueAvailable = Math.max(0, trueTotal - trueBorrowedQty);
+
+        if (trueAvailable >= issueQty) {
+          // Reconcile desynchronized stock count in MongoDB
+          await mongo.collection('equipment').updateOne(
+            { id: item.id },
+            {
+              $set: {
+                availableQty: trueAvailable,
+                available: trueAvailable,
+                borrowedQty: trueBorrowedQty,
+                borrowed: trueBorrowedQty,
+                updatedAt: new Date().toISOString()
+              }
+            }
+          );
+          // Retry the atomic deduction
+          result = await mongo.collection('equipment').findOneAndUpdate(
+            {
+              id: item.id,
+              $or: [
+                { availableQty: { $gte: issueQty } },
+                { available: { $gte: issueQty } }
+              ]
+            },
+            {
+              $inc: { availableQty: -issueQty, available: -issueQty, borrowedQty: issueQty, borrowed: issueQty },
+              $set: { updatedAt: new Date().toISOString() }
+            },
+            { returnDocument: 'after' }
+          );
+          updatedDoc = (result && result.value !== undefined) ? result.value : result;
+        }
+      }
+
+      if (!updatedDoc) {
         return res.status(409).json({ success: false, error: 'Stock reservation conflict: requested item was already borrowed by another session.' });
       }
-      Object.assign(item, result.value);
+
+      if (updatedDoc._id) {
+        delete updatedDoc._id;
+      }
+      Object.assign(item, updatedDoc);
     } catch (e) {
       item.availableQty = Math.max(0, currentAvailable - issueQty);
       item.available = item.availableQty;
@@ -517,6 +580,15 @@ router.post('/add-equipment', (req, res) => {
   db.equipment.push(newItem);
   saveDatabase();
 
+  const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+  if (mongo) {
+    try {
+      const cleanItem = { ...newItem };
+      delete cleanItem._id;
+      mongo.collection('equipment').insertOne(cleanItem).catch(() => {});
+    } catch (e) {}
+  }
+
   res.status(201).json({ success: true, message: 'Equipment added successfully.', item: newItem });
 });
 
@@ -625,6 +697,15 @@ router.post('/update-equipment', (req, res) => {
     }
 
     saveDatabase();
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        const cleanItem = { ...item };
+        delete cleanItem._id;
+        mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true }).catch(() => {});
+      } catch (e) {}
+    }
 
     res.json({
       success: true,
@@ -829,6 +910,15 @@ router.post('/assign-student-rfid', (req, res) => {
     student.rfid = cleanRfid;
     saveDatabase();
 
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        const cleanStudent = { ...student };
+        delete cleanStudent._id;
+        mongo.collection('users').replaceOne({ id: student.id }, cleanStudent, { upsert: true }).catch(() => {});
+      } catch (e) {}
+    }
+
     const actionMsg = wasReplaced
       ? `RFID Tag Replaced Successfully: Replaced ${oldTag} with ${cleanRfid} for ${student.name} (${student.user_id || student.regNo}).`
       : `RFID Assigned Successfully: ${cleanRfid} has been assigned to ${student.user_id || student.regNo || student.name}.`;
@@ -913,6 +1003,15 @@ router.post('/assign-equipment-rfid', (req, res) => {
     item.rfid = cleanRfid;
     item.rfidCode = cleanRfid;
     saveDatabase();
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        const cleanItem = { ...item };
+        delete cleanItem._id;
+        mongo.collection('equipment').replaceOne({ id: item.id }, cleanItem, { upsert: true }).catch(() => {});
+      } catch (e) {}
+    }
 
     const actionMsg = wasReplaced
       ? `Equipment RFID Tag Replaced Successfully: Replaced ${oldTag} with ${cleanRfid} for ${item.name}.`

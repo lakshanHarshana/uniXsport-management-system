@@ -78,8 +78,8 @@ const { db, saveDatabase } = require('./db');
 function calculateMetrics() {
   const allUsers = db.users || [];
   const activeUsers = allUsers.filter(u => u.status !== 'inactive' && u.status !== 'deactivated').length;
-  const activeStudents = allUsers.filter(u => u.role === 'student' && (u.status === 'active' || !u.status)).length;
-  const activeCoaches = allUsers.filter(u => u.role === 'coach' && (u.status === 'active' || !u.status)).length;
+  const activeStudents = allUsers.filter(u => (u.role || '').toLowerCase() === 'student' && ((u.status || '').toLowerCase() === 'active' || !u.status)).length;
+  const activeCoaches = allUsers.filter(u => (u.role || '').toLowerCase() === 'coach' && ((u.status || '').toLowerCase() === 'active' || !u.status)).length;
 
   const allEquipment = db.equipment || [];
   const totalEquipment = allEquipment.reduce((sum, e) => sum + (parseInt(e.totalQty) || parseInt(e.total) || parseInt(e.availableQty) || 1), 0);

@@ -454,8 +454,18 @@ router.post('/change-password', authenticateToken, async (req, res) => {
     // Hash new password and update in database
     const newHash = await bcrypt.hash(newPassword, 10);
     user.passwordHash = newHash;
-    user.password = newPassword;
+    delete user.password;
     saveDatabase();
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        await mongo.collection('users').updateOne(
+          { id: user.id },
+          { $set: { passwordHash: newHash, updatedAt: new Date().toISOString() }, $unset: { password: "" } }
+        );
+      } catch (e) {}
+    }
 
     res.json({
       success: true,
@@ -478,14 +488,26 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Email and new password are required.' });
     }
 
-    const user = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    const cleanEmail = email.toLowerCase().trim();
+    const user = db.users.find(u => u.email && u.email.toLowerCase().trim() === cleanEmail);
     if (!user) {
       return res.status(404).json({ success: false, error: 'No account found with this email address.' });
     }
 
-    user.passwordHash = await bcrypt.hash(newPassword, 10);
-    user.password = newPassword;
+    const newHash = await bcrypt.hash(newPassword, 10);
+    user.passwordHash = newHash;
+    delete user.password;
     saveDatabase();
+
+    const mongo = typeof getMongoDb === 'function' ? getMongoDb() : null;
+    if (mongo) {
+      try {
+        await mongo.collection('users').updateOne(
+          { id: user.id },
+          { $set: { passwordHash: newHash, updatedAt: new Date().toISOString() }, $unset: { password: "" } }
+        );
+      } catch (e) {}
+    }
 
     res.json({ success: true, message: 'Password reset successful. You can now log in.' });
   } catch (err) {
